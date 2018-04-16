@@ -58,6 +58,7 @@ import moa.evaluation.RegressionPerformanceEvaluator;
  * @author Albert Bifet (abifet at cs dot waikato dot ac dot nz)
  * @version $Revision: 7 $
  */
+@SuppressWarnings("Duplicates")
 public class EvaluatePrequentialRegression extends RegressionMainTask {
 
     @Override

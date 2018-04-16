@@ -51,6 +51,7 @@ import com.yahoo.labs.samoa.instances.Prediction;
 
 import moa.core.Utils;
 
+@SuppressWarnings("Duplicates")
 public abstract class AbstractClassifier extends AbstractOptionHandler
         implements Classifier { //Learner<Example<Instance>> {
 

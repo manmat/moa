@@ -25,6 +25,7 @@ import com.github.javacliparser.MultiChoiceOption;
 import com.yahoo.labs.samoa.instances.Instance;
 import moa.classifiers.Classifier;
 import moa.classifiers.Parallel;
+import moa.classifiers.trees.FIMTDD;
 import moa.classifiers.trees.FIMTQR;
 import moa.core.MiscUtils;
 
@@ -40,7 +41,7 @@ public class OoBConformalRegressor extends ConformalRegressor implements Paralle
   protected double quantileUpper;
   protected double quantileLower;
 
-  protected Classifier[] ensemble;
+  protected FIMTDD[] ensemble;
   private boolean[] wasUpdatedLast;
   protected int subspaceSize;
   protected int maxCalibrationInstances;
@@ -323,15 +324,19 @@ public class OoBConformalRegressor extends ConformalRegressor implements Paralle
   protected void initEnsemble(Instance instance) {
     // Init the ensemble.
     int ensembleSize = ensembleSizeOption.getValue();
-    ensemble = new FIMTQR[ensembleSize];
+    ensemble = new FIMTDD[ensembleSize];
 
     subspaceSize = calculateSubspaceSize(
         mFeaturesPerTreeSizeOption.getValue(), mFeaturesModeOption.getChosenIndex(), instance);
 
+    FIMTDD baseLearner = (FIMTDD) getPreparedClassOption(this.baseLearnerOption);
+    baseLearner.subspaceSizeOption.setValue(subspaceSize);
+    baseLearner.resetLearning();
+
     for (int i = 0; i < ensembleSize; i++) {
-      ensemble[i] = new FIMTQR(1, subspaceSize);
-      ensemble[i].prepareForUse(); // Enforce config object creation. Should be better ways to do this
+      ensemble[i] = (FIMTDD) baseLearner.copy();
       ensemble[i].resetLearning();
+      ensemble[i].treeID = i;
     }
 
 
@@ -353,6 +358,11 @@ public class OoBConformalRegressor extends ConformalRegressor implements Paralle
     if (executor != null) {
       executor.shutdown();
     }
+  }
+
+  @Override
+  public Classifier[] getSubClassifiers() {
+    return this.ensemble;
   }
 
   class OoBPredictionRunnable implements Runnable, Callable<Map.Entry> {

@@ -97,9 +97,9 @@ public class Measurement extends AbstractMOAObject {
             if (mEstimator.getTotalWeightObserved() > 1.0) {
                 averagedMeasurements.add(new Measurement("[avg] " + mName,
                         mEstimator.getMean()));
-                averagedMeasurements.add(new Measurement("[err] " + mName,
-                        mEstimator.getStdDev()
-                        / Math.sqrt(mEstimator.getTotalWeightObserved())));
+//                averagedMeasurements.add(new Measurement("[std] " + mName,
+//                        mEstimator.getStdDev()
+//                        / Math.sqrt(mEstimator.getTotalWeightObserved())));
             }
         }
         return averagedMeasurements.toArray(new Measurement[averagedMeasurements.size()]);

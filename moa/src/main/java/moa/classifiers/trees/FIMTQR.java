@@ -22,21 +22,21 @@ package moa.classifiers.trees;
 import com.github.javacliparser.IntOption;
 import com.yahoo.labs.samoa.instances.Instance;
 import com.bigml.histogram.*;
+import com.yahoo.labs.samoa.instances.InstanceImpl;
 import moa.classifiers.core.attributeclassobservers.FIMTDDNumericAttributeClassObserver;
 import moa.classifiers.core.conditionaltests.InstanceConditionalTest;
+import moa.core.Measurement;
+import moa.core.SizeOf;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 
 public class FIMTQR extends FIMTDD {
 
   public IntOption numBins = new IntOption(
-      "numBins", 'b', "Number of bins to use at leaf histograms",
-      100, 1, Integer.MAX_VALUE);
-
-  public IntOption subspaceSizeOption = new IntOption("subspaceSizeSize", 'k',
-      "Number of features per subset for each node split. Negative values = #features - k",
-      2, Integer.MIN_VALUE, Integer.MAX_VALUE);
+          "numBins", 'b', "Number of bins to use at leaf histograms",
+          100, 1, Integer.MAX_VALUE);
 
   public FIMTQR() {
 
@@ -58,9 +58,44 @@ public class FIMTQR extends FIMTDD {
     Histogram getPredictionHistogram(Instance instance);
   }
 
+  public static class QRInactiveNode extends InactiveLearningNode implements withHistogram {
+    protected Histogram labelHistogram;
+
+    public QRInactiveNode(LeafNode leafNode) {
+      super(leafNode);
+      assert leafNode instanceof withHistogram;
+      labelHistogram = ((QRLeafNode) leafNode).getLabelHistogram();
+    }
+
+    @Override
+    public void learnFromInstance(Instance inst) {
+      // Update the statistics for this node
+      // number of instances passing through the node
+      examplesSeen += inst.weight();
+      // sum of y values
+      sumOfValues += inst.weight() * inst.classValue();
+      // sum of squared y values
+      sumOfSquares += inst.weight() * inst.classValue() * inst.classValue();
+      // sum of absolute errors
+      sumOfAbsErrors += inst.weight() * Math.abs(tree.normalizeTargetValue(Math.abs(inst.classValue() - getPrediction(inst))));
+      try {
+        labelHistogram.insert(inst.classValue());
+      } catch (MixedInsertException e) {
+        e.printStackTrace();
+      }
+    }
+
+    @Override
+    public Histogram getPredictionHistogram(Instance instance) {
+      return labelHistogram;
+    }
+
+  }
+
   public static class QRLeafNode extends LeafNode implements withHistogram{
 
     private Histogram labelHistogram;
+
     private int[] attributeIndexList;
 
     private int subspaceSize;
@@ -76,8 +111,17 @@ public class FIMTQR extends FIMTDD {
       subspaceSize = tree.subspaceSizeOption.getValue();
     }
 
+    public QRLeafNode(FIMTQR tree, Node existingNode) {
+      super(tree, existingNode);
+      assert existingNode instanceof QRInactiveNode;
+      // We fake an instance because we are sure the node should be a leaf node if it was previously deactivated
+      Instance dummy = new InstanceImpl(0);
+      labelHistogram = ((withHistogram) existingNode).getPredictionHistogram(dummy);
+      subspaceSize = tree.subspaceSizeOption.getValue();
+    }
+
     @Override
-    public void learnFromInstance(Instance inst, boolean growthAllowed) {
+    public void learnFromInstance(Instance inst) {
       // Create a list of unique attribute indices with subspaceSize elements
       // tvas: This seems more reasonable than what ARFHoeffdingTree does, shouldn't make
       // much diff in performance anyway, but could try micro-benching if it turns out this matters.
@@ -101,13 +145,10 @@ public class FIMTQR extends FIMTDD {
       // Update the statistics for this node
       // number of instances passing through the node
       examplesSeen += inst.weight();
-
       // sum of y values
       sumOfValues += inst.weight() * inst.classValue();
-
       // sum of squared y values
       sumOfSquares += inst.weight() * inst.classValue() * inst.classValue();
-
       // sum of absolute errors
       sumOfAbsErrors += inst.weight() * Math.abs(tree.normalizeTargetValue(Math.abs(inst.classValue() - getPrediction(inst))));
 
@@ -129,7 +170,7 @@ public class FIMTQR extends FIMTDD {
         }
       }
 
-      if (growthAllowed) {
+      if (tree.growthAllowed) {
         checkForSplit(tree);
       }
       try {
@@ -141,6 +182,10 @@ public class FIMTQR extends FIMTDD {
 
     @Override
     public Histogram getPredictionHistogram(Instance instance) {
+      return labelHistogram;
+    }
+
+    public Histogram getLabelHistogram() {
       return labelHistogram;
     }
   }
@@ -159,7 +204,7 @@ public class FIMTQR extends FIMTDD {
 
     public Histogram getPredictionHistogram(Instance instance) {
       Node curNode = children.get(splitTest.branchForInstance(instance));
-      assert curNode instanceof withHistogram;
+      assert curNode instanceof withHistogram : "Incorrect QRSplitNode class: " + curNode.getClass();
       return ((withHistogram) curNode).getPredictionHistogram(instance);
     }
   }
@@ -172,13 +217,44 @@ public class FIMTQR extends FIMTDD {
   }
 
   @Override
+  protected LeafNode newLeafNode(Node existingNode) {
+    return new QRLeafNode(this, existingNode);
+  }
+
+  @Override
   protected SplitNode newSplitNode(InstanceConditionalTest splitTest) {
     maxID++;
     return new QRSPlitNode(splitTest, this);
+  }
+
+  @Override
+  protected InactiveLearningNode createInactiveNode(LeafNode existingNode) {
+    return new QRInactiveNode(existingNode);
   }
 
   public Histogram getPredictionHistogram(Instance instance) {
     return ((withHistogram)treeRoot).getPredictionHistogram(instance);
   }
 
+  private int measureHistogramSize() {
+    FoundNode[] learningNodes = findLearningNodes();
+    int sizeSum = 0;
+    Instance dummy = new InstanceImpl(0);
+    for (FoundNode learningNode : learningNodes) {
+      Histogram labelHistogram = ((withHistogram) learningNode.node).getPredictionHistogram(dummy);
+      sizeSum += SizeOf.fullSizeOf(labelHistogram);
+    }
+
+    return sizeSum;
+  }
+
+  @Override
+  protected Measurement[] getModelMeasurementsImpl() {
+    Measurement[] fimtddMetrics =  super.getModelMeasurementsImpl();
+    Measurement histogramSize = new Measurement("histogram size (bytes)",
+            measureHistogramSize());
+    Measurement[] newMetrics = Arrays.copyOf(fimtddMetrics, fimtddMetrics.length + 1);
+    newMetrics[fimtddMetrics.length] = histogramSize;
+    return newMetrics;
+  }
 }

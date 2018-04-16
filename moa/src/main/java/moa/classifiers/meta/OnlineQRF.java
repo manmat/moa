@@ -21,6 +21,7 @@ package moa.classifiers.meta;
 
 import com.bigml.histogram.Histogram;
 import com.bigml.histogram.MixedInsertException;
+import com.github.javacliparser.FlagOption;
 import com.github.javacliparser.FloatOption;
 import com.github.javacliparser.IntOption;
 import com.github.javacliparser.MultiChoiceOption;
@@ -50,7 +51,7 @@ import static moa.classifiers.meta.AdaptiveRandomForest.calculateSubspaceSize;
 public class OnlineQRF  extends AbstractClassifier implements Regressor, Parallel {
   private double quantileUpper;
   private double quantileLower;
-  private HistogramLearner[] ensemble;
+  private FIMTQR[] ensemble;
   private int subspaceSize;
   long instancesSeen;
 
@@ -58,36 +59,35 @@ public class OnlineQRF  extends AbstractClassifier implements Regressor, Paralle
   private CompletionService<Histogram> ecs;
   private ForkJoinPool forkJoinPool; // Needed because the streams interface will take all processors otherwise
 
-  public ClassOption treeLearnerOption = new ClassOption("treeLearner", 'l',
-      "Random Forest Tree.", Classifier.class,"trees.FIMTQR -e");
+  public ClassOption baseLearnerOption = new ClassOption("treeLearner", 'l',
+          "Random Forest Tree.", Classifier.class,"trees.FIMTQR -e");
 
   public IntOption ensembleSize = new IntOption("ensembleSize", 's', "Number of trees in the ensemble",
-      5, 1, Integer.MAX_VALUE);
+          10, 1, Integer.MAX_VALUE);
 
-  // This could be a float, but I feel this is enough precision
   public FloatOption confidenceLevel = new FloatOption("confidenceLevel", 'a',
-      "The confidence level in integer percentage points (e.g. 95 = 95% prediction interval)",
-      0.9, 0.0, 1.0);
+          "The confidence level as a float (e.g. 0.95 = 95% prediction interval)",
+          0.9, 0.0, 1.0);
 
   public IntOption numBins = new IntOption(
-      "numBins", 'b', "Number of bins to use at leaf histograms",
-      100, 1, Integer.MAX_VALUE);
+          "numBins", 'b', "Number of bins to use at leaf histograms",
+          100, 1, Integer.MAX_VALUE);
 
   public FloatOption lambdaOption = new FloatOption("lambda", 'd',
-      "The lambda parameter for bagging.", 6.0, 1.0, Float.MAX_VALUE);
+          "The lambda parameter for bagging.", 6.0, 1.0, Float.MAX_VALUE);
 
 
   public MultiChoiceOption mFeaturesModeOption = new MultiChoiceOption("mFeaturesMode", 'o',
-      "Defines how m, defined by mFeaturesPerTreeSize, is interpreted. M represents the total number of features.",
-      new String[]{"Specified m (integer value)", "sqrt(M)+1", "M-(sqrt(M)+1)",
-          "Percentage (M * (m / 100))"},
-      new String[]{"SpecifiedM", "SqrtM1", "MSqrtM1", "Percentage"}, 1);
+          "Defines how m, defined by mFeaturesPerTreeSize, is interpreted. M represents the total number of features.",
+          new String[]{"Specified m (integer value)", "sqrt(M)+1", "M-(sqrt(M)+1)",
+                  "Percentage (M * (m / 100))"},
+          new String[]{"SpecifiedM", "SqrtM1", "MSqrtM1", "Percentage"}, 3);
 
   public IntOption mFeaturesPerTreeSizeOption = new IntOption("mFeaturesPerTreeSize", 'm',
-      "Number of features allowed considered for each split. Negative values corresponds to M - m", 2, Integer.MIN_VALUE, Integer.MAX_VALUE);
+          "Number of features allowed considered for each split. Negative values corresponds to M - m", 100, Integer.MIN_VALUE, Integer.MAX_VALUE);
 
   public IntOption numberOfJobsOption = new IntOption("numberOfJobs", 'j',
-      "Total number of concurrent jobs used for processing (-1 = as much as possible, 0 = do not use multithreading)", 1, -1, Integer.MAX_VALUE);
+          "Total number of concurrent jobs used for processing (-1 = as much as possible, 0 = do not use multithreading)", 1, -1, Integer.MAX_VALUE);
 
 
   @Override
@@ -118,9 +118,9 @@ public class OnlineQRF  extends AbstractClassifier implements Regressor, Paralle
   private Histogram singleThreadedPredict(Instance inst) {
     Histogram prevHist = null;
     // We iterate through all learners, and merge histograms as we go
-    for (HistogramLearner member : ensemble) {
-      if (!member.learner.trainingHasStarted()) {
-        return new Histogram(numBins.getValue());
+    for (FIMTQR member : ensemble) {
+      if (!member.trainingHasStarted()) {
+        continue;
       }
       if (prevHist == null) {
         prevHist = member.getPredictionHistogram(inst);
@@ -135,15 +135,15 @@ public class OnlineQRF  extends AbstractClassifier implements Regressor, Paralle
       }
     }
 
-    return prevHist;
+    return prevHist == null ? new Histogram(numBins.getValue()) : prevHist;
   }
 
   private Histogram multiThreadedPredict(Instance inst) {
     ArrayList<Future<Histogram>> histogramFutures = new ArrayList<>();
     Histogram combinedHist = new Histogram(numBins.getValue());
 
-    for (HistogramLearner member : ensemble) {
-      if (!member.learner.trainingHasStarted()) {
+    for (FIMTQR member : ensemble) {
+      if (!member.trainingHasStarted()) {
         return combinedHist;
       }
       if (this.executor != null) {
@@ -178,7 +178,7 @@ public class OnlineQRF  extends AbstractClassifier implements Regressor, Paralle
     // This will do the merging in parallel
     try {
       combinedHist = forkJoinPool.submit(() -> histograms.parallelStream()
-          .reduce(new Histogram(numBins.getValue()), merger)).get();
+              .reduce(new Histogram(numBins.getValue()), merger)).get();
     } catch (InterruptedException | ExecutionException e) {
       e.printStackTrace();
     }
@@ -189,9 +189,9 @@ public class OnlineQRF  extends AbstractClassifier implements Regressor, Paralle
   @Override
   public void resetLearningImpl() {
     // Translate confidence to upper and lower quantiles
-    double halfConfidence = (1.0 - confidenceLevel.getValue()) / 2.0; // We divide by two for each region (lower,upper)
-    quantileLower = 0.0 + halfConfidence;
-    quantileUpper = 1.0 - halfConfidence;
+    double halfSignificance = (1.0 - confidenceLevel.getValue()) / 2.0; // We divide by two for each region (lower,upper)
+    quantileLower = 0.0 + halfSignificance;
+    quantileUpper = 1.0 - halfSignificance;
 
     // Multi-threading
     int numberOfJobs;
@@ -214,7 +214,7 @@ public class OnlineQRF  extends AbstractClassifier implements Regressor, Paralle
       initEnsemble(instance);
 
     Collection<TrainingRunnable> trainers = new ArrayList<>();
-    for (HistogramLearner member : ensemble) {
+    for (FIMTQR member : ensemble) {
       // Predict and evaluate here? ARF does this, why?
 //      double[] prediction = member.getVotesForInstance(instance);
       int k = MiscUtils.poisson(lambdaOption.getValue(), this.classifierRandom);
@@ -222,12 +222,12 @@ public class OnlineQRF  extends AbstractClassifier implements Regressor, Paralle
         Instance weightedInstance = instance.copy();
         weightedInstance.setWeight(k);
         if(this.executor != null) {
-          TrainingRunnable trainer = new TrainingRunnable(member.learner,
-              weightedInstance);
+          TrainingRunnable trainer = new TrainingRunnable(member,
+                  weightedInstance);
           trainers.add(trainer);
         }
         else {
-          member.learner.trainOnInstance(weightedInstance);
+          member.trainOnInstance(weightedInstance);
         }
       }
     }
@@ -263,17 +263,21 @@ public class OnlineQRF  extends AbstractClassifier implements Regressor, Paralle
   protected void initEnsemble(Instance instance) {
     // Init the ensemble.
     int ensembleSize = this.ensembleSize.getValue();
-    ensemble = new HistogramLearner[ensembleSize];
+    ensemble = new FIMTQR[ensembleSize];
 
     subspaceSize = calculateSubspaceSize(
-        mFeaturesPerTreeSizeOption.getValue(), mFeaturesModeOption.getChosenIndex(), instance);
+            mFeaturesPerTreeSizeOption.getValue(), mFeaturesModeOption.getChosenIndex(), instance);
 
-    // TODO: Ended up breaking encapsulation. If we want the underlying tree to independent we'll need to do a bit
-    // more work
+    FIMTQR baseLearner = (FIMTQR) getPreparedClassOption(this.baseLearnerOption);
+    baseLearner.subspaceSizeOption.setValue(subspaceSize);
+    baseLearner.numBins.setValue(numBins.getValue());
+    baseLearner.resetLearning();
+
+    // TODO: Ended up breaking encapsulation. Need to generalize if we want to use trees other than FIMT
     for (int i = 0; i < ensembleSize; i++) {
-      ensemble[i] = new HistogramLearner(numBins.getValue(), subspaceSize);
-      ensemble[i].learner.prepareForUse(); // Enforce config object creation. Should be better ways to do this
-      ensemble[i].learner.resetLearning();
+      ensemble[i] = (FIMTQR) baseLearner.copy();
+      ensemble[i].resetLearning();
+      ensemble[i].treeID = i;
     }
 
   }
@@ -301,24 +305,17 @@ public class OnlineQRF  extends AbstractClassifier implements Regressor, Paralle
     }
   }
 
-  private class HistogramLearner {
-    public FIMTQR learner;
-
-    public HistogramLearner(int numBins, int subspaceSize) {
-      learner = new FIMTQR(numBins, subspaceSize);
-    }
-
-    public Histogram getPredictionHistogram(Instance instance) {
-      return learner.getPredictionHistogram(instance);
-    }
+  @Override
+  public Classifier[] getSubClassifiers() {
+    return this.ensemble;
   }
 
   class HistogramPredictionRunnable implements Runnable, Callable<Histogram> {
-    final private HistogramLearner learner;
+    final private FIMTQR learner;
     final private Instance instance;
     private Histogram histogram;
 
-    public HistogramPredictionRunnable(HistogramLearner learner, Instance instance) {
+    public HistogramPredictionRunnable(FIMTQR learner, Instance instance) {
       this.learner = learner;
       this.instance = instance;
     }

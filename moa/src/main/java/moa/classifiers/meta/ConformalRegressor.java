@@ -36,7 +36,7 @@ import java.util.Arrays;
 
 public class ConformalRegressor extends AbstractClassifier implements Regressor{
   public ClassOption baseLearnerOption = new ClassOption("baseLearner", 'l',
-      "Regressor to train.", Classifier.class, "trees.FIMTDD");
+      "Regressor to train.", Classifier.class, "trees.FIMTDD -e");
 
   public StringOption calibrationDataset = new StringOption("calibrationData", 'c',
       "Filepath to the arff file to be used as a calibration dataset", "");

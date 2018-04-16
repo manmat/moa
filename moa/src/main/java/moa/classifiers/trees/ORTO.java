@@ -194,7 +194,7 @@ public class ORTO extends FIMTDD implements Regressor {
 			Node currentNode = node;
 			while (true) {
 				if (currentNode instanceof LeafNode) {
-					((LeafNode) currentNode).learnFromInstance(inst, growthAllowed);
+					((LeafNode) currentNode).learnFromInstance(inst);
 					break;
 				} else {
 					currentNode.examplesSeen += inst.weight();

@@ -93,6 +93,7 @@ import com.yahoo.labs.samoa.instances.Instance;
  * @author Richard Kirkby (rkirkby@cs.waikato.ac.nz)
  * @version $Revision: 7 $
  */
+@SuppressWarnings("Duplicates")
 public class HoeffdingTree extends AbstractClassifier implements MultiClassClassifier {
 
     private static final long serialVersionUID = 1L;
@@ -381,6 +382,7 @@ public FlagOption binarySplitsOption = new FlagOption("binarySplits", 'b',
         }
     }
 
+    @SuppressWarnings("Duplicates")
     public static class ActiveLearningNode extends LearningNode {
 
         private static final long serialVersionUID = 1L;
