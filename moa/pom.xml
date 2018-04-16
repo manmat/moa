@@ -90,6 +90,12 @@
       <version>1.2.1</version>
       <scope>test</scope>
     </dependency>
+
+      <dependency>
+          <groupId>com.yahoo.datasketches</groupId>
+          <artifactId>sketches-core</artifactId>
+          <version>0.11.0</version>
+      </dependency>
   </dependencies>
 
   <build>
