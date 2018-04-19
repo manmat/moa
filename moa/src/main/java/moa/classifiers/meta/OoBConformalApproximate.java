@@ -28,10 +28,7 @@ public class OoBConformalApproximate extends OoBConformalRegressor{
 
   @Override
   protected void updateCalibrationScores() {
-    // TODO: Optimize, not necessary to update all scores with every tree update
-    double[] predictions = new double[instanceToLearnerToPrediction.size()];
-    double[] trueValues = new double[instanceToLearnerToPrediction.size()];
-    int i = 0; // Used to keep track of which calibration instance we are checking
+    calibrationScores.clear();
     for (Map.Entry<Instance, HashMap<Integer, Double>> instancePredictionsMap : instanceToLearnerToPrediction.entrySet()) {
       Instance curInstance = instancePredictionsMap.getKey();
       HashMap<Integer, Double> predictorIndexPredictionMap = instancePredictionsMap.getValue();
@@ -40,13 +37,9 @@ public class OoBConformalApproximate extends OoBConformalRegressor{
         sum += predictorIndexPredictionEntry.getValue();
       }
       double prediction = sum / predictorIndexPredictionMap.size();
-      predictions[i] = prediction;
-      trueValues[i] = curInstance.classValue();
-      i++;
+      double trueValue = curInstance.classValue();
+      double calScore = errorFunction(prediction, trueValue);
+      calibrationScores.put(curInstance, calScore);
     }
-
-    double[] calScores = errorFunction(predictions, trueValues);
-    Arrays.sort(calScores);
-    calibrationScores = calScores;
   }
 }

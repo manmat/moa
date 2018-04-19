@@ -19,6 +19,7 @@ package moa.classifiers.meta;
      * #L%
      */
 
+import clojure.lang.MapEntry;
 import com.github.javacliparser.FloatOption;
 import com.github.javacliparser.IntOption;
 import com.github.javacliparser.StringOption;
@@ -33,6 +34,8 @@ import moa.streams.ArffFileStream;
 import java.util.ArrayList;
 import java.lang.Math;
 import java.util.Arrays;
+import java.util.Collection;
+import java.util.HashMap;
 
 public class ConformalRegressor extends AbstractClassifier implements Regressor{
   public ClassOption baseLearnerOption = new ClassOption("baseLearner", 'l',
@@ -49,9 +52,10 @@ public class ConformalRegressor extends AbstractClassifier implements Regressor{
 
   private Classifier model;
 
+  //TODO: merge these
   private ArrayList<Instance> calibrationSet;
 
-  double[] calibrationScores;
+  HashMap<Instance, Double> calibrationScores;
 
   private void readCalibrationSet() {
     ArffFileStream stream = new ArffFileStream(calibrationDataset.getValue(), -1);
@@ -62,12 +66,16 @@ public class ConformalRegressor extends AbstractClassifier implements Regressor{
     }
   }
 
+  double errorFunction(double prediction, double trueValue){
+    return Math.abs(prediction - trueValue);
+  }
+
   double[] errorFunction(double[] predictions, double[] trueValues) {
     // Implementing the absolute error function for now, this could be generalized
     double[] scores = new double[trueValues.length];
     // TODO: Should be done in jBLAS or something
     for (int i = 0; i < trueValues.length; i++) {
-      scores[i] = Math.abs(predictions[i] - trueValues[i]);
+      scores[i] = errorFunction(predictions[i], trueValues[i]);
     }
 
     return scores;
@@ -83,9 +91,17 @@ public class ConformalRegressor extends AbstractClassifier implements Regressor{
     // tvas: We assume the calibration scores are up-to-date and sorted
 //    double[] calibrationScores = reverseArray(this.calibrationScores); // TODO: Not necessary if I just pass confidenceOption as significance?
 //    assert isSorted(calibrationScores); // TODO: Debug purposes, remove for testing
-    int border = (int) Math.floor(significance * (calibrationScores.length + 1)) - 1;
-    border = Math.min(Math.max(border, 0), calibrationScores.length - 1);
-    return calibrationScores[border];
+    Collection<Double> scores = calibrationScores.values();
+    double[] sorted = new double[scores.size()];
+    int i = 0;
+    for (Double score: scores){
+      sorted[i] = score;
+      i++;
+    }
+    Arrays.sort(sorted);
+    int border = (int) Math.floor(significance * (sorted.length + 1)) - 1;
+    border = Math.min(Math.max(border, 0), sorted.length - 1);
+    return sorted[border];
   }
 
 
@@ -102,16 +118,13 @@ public class ConformalRegressor extends AbstractClassifier implements Regressor{
     double[] predictions = new double[calibrationSet.size()];
     double[] trueValues = new double[calibrationSet.size()];
     // tvas: mah performance!
-    for (int i = 0; i < predictions.length; i++) {
-      Instance calInstance = calibrationSet.get(i);
-      trueValues[i] = calInstance.classValue();
+    calibrationScores.clear();
+    for (Instance calInstance: calibrationSet) {
+      double trueValue = calInstance.classValue();
       double[] prediction = model.getVotesForInstance(calInstance);
       assert prediction.length == 1;
-      predictions[i] = prediction[0];
+      calibrationScores.put(calInstance, errorFunction(prediction[0], trueValue));
     }
-    double[] calScores = errorFunction(predictions, trueValues);
-    Arrays.sort(calScores);
-    calibrationScores = calScores;
   }
 
   @Override
@@ -133,8 +146,7 @@ public class ConformalRegressor extends AbstractClassifier implements Regressor{
     model = (Classifier) getPreparedClassOption(baseLearnerOption);
     assert model instanceof Regressor; // Will this work?
     calibrationSet = new ArrayList<>();
-    calibrationScores = new double[maxCalibrationInstancesOption.getValue()];
-    Arrays.fill(calibrationScores, 0d);
+    calibrationScores = new HashMap<>();
 
     model.resetLearning();
     if (calibrationDataset.getValue().endsWith(".arff")) {

@@ -42,11 +42,13 @@ public class OoBConformalRegressor extends ConformalRegressor implements Paralle
   protected double quantileLower;
 
   protected FIMTDD[] ensemble;
-  private boolean[] wasUpdatedLast;
+  private long[] timeOfUpdate;
   protected int subspaceSize;
   protected int maxCalibrationInstances;
+  protected long trainingInstances = 0;
 
   protected HashMap<Instance, HashMap<Integer, Double>> instanceToLearnerToPrediction;
+  protected HashMap<Instance, Long> timeOfLastRecalculation;
 
   protected ExecutorService executor;
   protected CompletionService<double[]> ecs;
@@ -69,9 +71,12 @@ public class OoBConformalRegressor extends ConformalRegressor implements Paralle
   public IntOption numberOfJobsOption = new IntOption("numberOfJobs", 'j',
       "Total number of concurrent jobs used for processing (-1 = as much as possible, 0 = do not use multithreading)", 1, -1, Integer.MAX_VALUE);
 
+  public FloatOption recalibrationRation = new FloatOption("recalibrationRatio", 'r',
+          "The ration of the changed learners to all oob learners to recalculate the calibration score for a given instance", 0.5, 0.0, 1.0);
+
   @Override
   public void trainOnInstanceImpl(Instance inst) {
-
+    trainingInstances++;
     HashMap<Integer, Double> oobTreeIndicesToPredictions = commonTraining(inst);
     // TODO: Have a "burn-in" period for the algo, where we ensure the first x
     // data points end up as OoB for at least one learner. That way we fill up
@@ -79,12 +84,16 @@ public class OoBConformalRegressor extends ConformalRegressor implements Paralle
     if (!oobTreeIndicesToPredictions.isEmpty()) {
       if (instanceToLearnerToPrediction.size() < maxCalibrationInstances) {
         instanceToLearnerToPrediction.put(inst, oobTreeIndicesToPredictions);
+        timeOfLastRecalculation.put(inst, trainingInstances);
       } else { // this way we are removing a random (?) element from the map
         Set<Instance> instanceSet = instanceToLearnerToPrediction.keySet();
         Instance[] instances = instanceSet.toArray(new Instance[instanceSet.size()]);
 
         instanceToLearnerToPrediction.remove(instances[0]);
+        calibrationScores.remove(instances[0]);
+        timeOfLastRecalculation.remove(instances[0]);
         instanceToLearnerToPrediction.put(inst, oobTreeIndicesToPredictions);
+        timeOfLastRecalculation.put(inst, trainingInstances);
       }
     }
 
@@ -92,7 +101,6 @@ public class OoBConformalRegressor extends ConformalRegressor implements Paralle
   }
 
   protected HashMap<Integer, Double> commonTraining(Instance inst) {
-    Arrays.fill(wasUpdatedLast, false);
     HashMap<Integer, Double> oobTreeIndicesToPredictions = new HashMap<>();
 
     // tvas: Alternative is to have a map from instance to a tuple (predictorIndexList, predictionList)
@@ -105,7 +113,7 @@ public class OoBConformalRegressor extends ConformalRegressor implements Paralle
     for (int i = 0; i < ensemble.length; i++) {
       int k = MiscUtils.poisson(this.lambdaOption.getValue(), this.classifierRandom);
       if (k > 0) {
-        wasUpdatedLast[i] = true;
+        timeOfUpdate[i] = trainingInstances;
         Instance weightedInstance = inst.copy();
         weightedInstance.setWeight(k);
         if(this.executor != null) {
@@ -159,42 +167,49 @@ public class OoBConformalRegressor extends ConformalRegressor implements Paralle
 
   @Override
   protected void updateCalibrationScores() {
-    // TODO: Optimize, not necessary to update all scores with every tree update
-    double[] predictions = new double[instanceToLearnerToPrediction.size()];
-    double[] trueValues = new double[instanceToLearnerToPrediction.size()];
-    int i = 0; // Used to keep track of which calibration instance we are checking
+    calibrationScores.clear();
     for (Map.Entry<Instance, HashMap<Integer, Double>> instancePredictionsMap : instanceToLearnerToPrediction.entrySet()) {
       Instance curInstance = instancePredictionsMap.getKey();
       HashMap<Integer, Double> predictorIndexPredictionMap = instancePredictionsMap.getValue();
-      double sum = 0;
+      int oobPredictors = predictorIndexPredictionMap.size();
+      int needsRecalc = 0;
+      long instanceWasRecalculatedLast = timeOfLastRecalculation.get(curInstance);
       for (Map.Entry<Integer, Double> predictorIndexPredictionEntry : predictorIndexPredictionMap.entrySet()) {
-        int ensembleIndex = predictorIndexPredictionEntry.getKey();
-        double pred;
-        if (wasUpdatedLast[ensembleIndex]) {
-          pred = ensemble[predictorIndexPredictionEntry.getKey()].getVotesForInstance(curInstance)[0];
-          predictorIndexPredictionEntry.setValue(pred);
-        } else {
-          pred = predictorIndexPredictionEntry.getValue();
+        Integer ensembleIndex = predictorIndexPredictionEntry.getKey();
+        if (timeOfUpdate[ensembleIndex] > instanceWasRecalculatedLast)
+          needsRecalc++;
+      }
+      HashMap<Integer, Double> newPredictions = new HashMap<>();
+      double ratio = needsRecalc / (double) oobPredictors;
+      assert ratio <= 1.0 : "Error ratio was: " + ratio;
+      if (ratio >= this.recalibrationRation.getValue()){
+        for (Map.Entry<Integer, Double> predictorIndexPredictionEntry : predictorIndexPredictionMap.entrySet()){
+          Integer ensembleIndex = predictorIndexPredictionEntry.getKey();
+          if (timeOfUpdate[ensembleIndex] > instanceWasRecalculatedLast){
+            double pred = ensemble[ensembleIndex].getVotesForInstance(curInstance)[0];
+            newPredictions.put(ensembleIndex, pred);
+          } else {
+            newPredictions.put(ensembleIndex, predictorIndexPredictionEntry.getValue());
+          }
         }
-        sum += pred;
+        timeOfLastRecalculation.put(curInstance, trainingInstances);
+      } else {
+        newPredictions = predictorIndexPredictionMap;
+      }
+      double sum = 0;
+      for (double val: newPredictions.values()){
+        sum += val;
       }
       double prediction = sum / predictorIndexPredictionMap.size();
-      predictions[i] = prediction;
-      trueValues[i] = curInstance.classValue();
-      i++;
+      double trueValue = curInstance.classValue();
+      calibrationScores.put(curInstance, errorFunction(prediction, trueValue));
     }
-
-    double[] calScores = errorFunction(predictions, trueValues);
-    // TODO: For the approximate version of the algorithm, find which sorting algo is best
-    // for almost sorted lists (binary search then simple insertion?)
-    Arrays.sort(calScores);
-    calibrationScores = calScores;
   }
 
   @Override
   public double[] getVotesForInstance(Instance inst) {
     MomentAggregate curAggegate = getMoments(inst);
-    if (calibrationScores.length < 2) {
+    if (calibrationScores.size() < 2) {
       // TODO: Predictive sd is a bad estimate, come up with something else
       // tvas: Depending on the lambda setting, it could be a while until we get 10 cal instances, careful!
       // One option: https://stats.stackexchange.com/a/255131/16052
@@ -312,8 +327,10 @@ public class OoBConformalRegressor extends ConformalRegressor implements Paralle
     quantileLower = 0.0 + halfConfidence;
     quantileUpper = 1.0 - halfConfidence;
     ensemble = null;
-    wasUpdatedLast = new boolean[ensembleSizeOption.getValue()];
+    timeOfUpdate = new long[ensembleSizeOption.getValue()];
+    trainingInstances = 0;
     instanceToLearnerToPrediction = new HashMap<>();
+    timeOfLastRecalculation = new HashMap<>();
     maxCalibrationInstances = maxCalibrationInstancesOption.getValue();
 
     if (!calibrationDataset.getValue().equals("")) {
@@ -325,6 +342,7 @@ public class OoBConformalRegressor extends ConformalRegressor implements Paralle
     // Init the ensemble.
     int ensembleSize = ensembleSizeOption.getValue();
     ensemble = new FIMTDD[ensembleSize];
+    timeOfUpdate = new long[ensembleSize];
 
     subspaceSize = calculateSubspaceSize(
         mFeaturesPerTreeSizeOption.getValue(), mFeaturesModeOption.getChosenIndex(), instance);
@@ -337,6 +355,7 @@ public class OoBConformalRegressor extends ConformalRegressor implements Paralle
       ensemble[i] = (FIMTDD) baseLearner.copy();
       ensemble[i].resetLearning();
       ensemble[i].treeID = i;
+      timeOfUpdate[i] = 0;
     }
 
 
