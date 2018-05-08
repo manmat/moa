@@ -27,6 +27,7 @@ import moa.classifiers.Classifier;
 import moa.classifiers.Parallel;
 import moa.classifiers.trees.FIMTDD;
 import moa.classifiers.trees.FIMTQR;
+import moa.core.Measurement;
 import moa.core.MiscUtils;
 
 import java.util.*;
@@ -42,7 +43,7 @@ public class OoBConformalRegressor extends ConformalRegressor implements Paralle
   protected double quantileLower;
 
   protected FIMTDD[] ensemble;
-  private long[] timeOfUpdate;
+  protected long[] timeOfUpdate;
   protected int subspaceSize;
   protected int maxCalibrationInstances;
   protected long trainingInstances = 0;
@@ -53,29 +54,30 @@ public class OoBConformalRegressor extends ConformalRegressor implements Paralle
   protected ExecutorService executor;
   protected CompletionService<double[]> ecs;
 
+  protected long trainingTime = 0;
+  protected long numOfVoteCalls = 0;
+
   public IntOption ensembleSizeOption = new IntOption("ensembleSize", 's',
-      "The number of trees in the ensemble.", 10, 1, Integer.MAX_VALUE);
+          "The number of trees in the ensemble.", 10, 1, Integer.MAX_VALUE);
 
   public MultiChoiceOption mFeaturesModeOption = new MultiChoiceOption("mFeaturesMode", 'o',
-      "Defines how m, defined by mFeaturesPerTreeSize, is interpreted. M represents the total number of features.",
-      new String[]{"Specified m (integer value)", "sqrt(M)+1", "M-(sqrt(M)+1)",
-          "Percentage (M * (m / 100))"},
-      new String[]{"SpecifiedM", "SqrtM1", "MSqrtM1", "Percentage"}, 1);
+          "Defines how m, defined by mFeaturesPerTreeSize, is interpreted. M represents the total number of features.",
+          new String[]{"Specified m (integer value)", "sqrt(M)+1", "M-(sqrt(M)+1)",
+                  "Percentage (M * (m / 100))"},
+          new String[]{"SpecifiedM", "SqrtM1", "MSqrtM1", "Percentage"}, 1);
 
   public IntOption mFeaturesPerTreeSizeOption = new IntOption("mFeaturesPerTreeSize", 'm',
-      "Number of features allowed considered for each split. Negative values corresponds to M - m", 2, Integer.MIN_VALUE, Integer.MAX_VALUE);
+          "Number of features allowed considered for each split. Negative values corresponds to M - m", 2, Integer.MIN_VALUE, Integer.MAX_VALUE);
 
   public FloatOption lambdaOption = new FloatOption("lambda", 'd',
-      "The lambda parameter for bagging.", 1.0, 1.0, Float.MAX_VALUE);
+          "The lambda parameter for bagging.", 1.0, 1.0, Float.MAX_VALUE);
 
   public IntOption numberOfJobsOption = new IntOption("numberOfJobs", 'j',
-      "Total number of concurrent jobs used for processing (-1 = as much as possible, 0 = do not use multithreading)", 1, -1, Integer.MAX_VALUE);
-
-  public FloatOption recalibrationRation = new FloatOption("recalibrationRatio", 'r',
-          "The ration of the changed learners to all oob learners to recalculate the calibration score for a given instance", 0.5, 0.0, 1.0);
+          "Total number of concurrent jobs used for processing (-1 = as much as possible, 0 = do not use multithreading)", 1, -1, Integer.MAX_VALUE);
 
   @Override
   public void trainOnInstanceImpl(Instance inst) {
+    long startTime = System.nanoTime();
     trainingInstances++;
     HashMap<Integer, Double> oobTreeIndicesToPredictions = commonTraining(inst);
     // TODO: Have a "burn-in" period for the algo, where we ensure the first x
@@ -98,6 +100,8 @@ public class OoBConformalRegressor extends ConformalRegressor implements Paralle
     }
 
     updateCalibrationScores();
+    long estimatedTime = System.nanoTime() - startTime;
+    trainingTime += estimatedTime;
   }
 
   protected HashMap<Integer, Double> commonTraining(Instance inst) {
@@ -118,7 +122,7 @@ public class OoBConformalRegressor extends ConformalRegressor implements Paralle
         weightedInstance.setWeight(k);
         if(this.executor != null) {
           TrainingRunnable trainer = new TrainingRunnable(ensemble[i],
-              weightedInstance);
+                  weightedInstance);
           inBag.add(trainer);
         }
         else {
@@ -171,34 +175,17 @@ public class OoBConformalRegressor extends ConformalRegressor implements Paralle
     for (Map.Entry<Instance, HashMap<Integer, Double>> instancePredictionsMap : instanceToLearnerToPrediction.entrySet()) {
       Instance curInstance = instancePredictionsMap.getKey();
       HashMap<Integer, Double> predictorIndexPredictionMap = instancePredictionsMap.getValue();
-      int oobPredictors = predictorIndexPredictionMap.size();
-      int needsRecalc = 0;
-      long instanceWasRecalculatedLast = timeOfLastRecalculation.get(curInstance);
-      for (Map.Entry<Integer, Double> predictorIndexPredictionEntry : predictorIndexPredictionMap.entrySet()) {
-        Integer ensembleIndex = predictorIndexPredictionEntry.getKey();
-        if (timeOfUpdate[ensembleIndex] > instanceWasRecalculatedLast)
-          needsRecalc++;
-      }
-      HashMap<Integer, Double> newPredictions = new HashMap<>();
-      double ratio = needsRecalc / (double) oobPredictors;
-      assert ratio <= 1.0 : "Error ratio was: " + ratio;
-      if (ratio >= this.recalibrationRation.getValue()){
-        for (Map.Entry<Integer, Double> predictorIndexPredictionEntry : predictorIndexPredictionMap.entrySet()){
-          Integer ensembleIndex = predictorIndexPredictionEntry.getKey();
-          if (timeOfUpdate[ensembleIndex] > instanceWasRecalculatedLast){
-            double pred = ensemble[ensembleIndex].getVotesForInstance(curInstance)[0];
-            newPredictions.put(ensembleIndex, pred);
-          } else {
-            newPredictions.put(ensembleIndex, predictorIndexPredictionEntry.getValue());
-          }
-        }
-        timeOfLastRecalculation.put(curInstance, trainingInstances);
-      } else {
-        newPredictions = predictorIndexPredictionMap;
-      }
       double sum = 0;
-      for (double val: newPredictions.values()){
-        sum += val;
+      for (Map.Entry<Integer, Double> predictorIndexPredictionEntry : predictorIndexPredictionMap.entrySet()) {
+        int ensembleIndex = predictorIndexPredictionEntry.getKey();
+        double pred;
+        if (timeOfUpdate[ensembleIndex] == trainingInstances) {
+          pred = ensemble[predictorIndexPredictionEntry.getKey()].getVotesForInstance(curInstance)[0];
+          predictorIndexPredictionEntry.setValue(pred);
+        } else {
+          pred = predictorIndexPredictionEntry.getValue();
+        }
+        sum += pred;
       }
       double prediction = sum / predictorIndexPredictionMap.size();
       double trueValue = curInstance.classValue();
@@ -332,6 +319,8 @@ public class OoBConformalRegressor extends ConformalRegressor implements Paralle
     instanceToLearnerToPrediction = new HashMap<>();
     timeOfLastRecalculation = new HashMap<>();
     maxCalibrationInstances = maxCalibrationInstancesOption.getValue();
+    numOfVoteCalls = 0;
+    trainingTime = 0;
 
     if (!calibrationDataset.getValue().equals("")) {
       System.out.println("WARNING: OoBCOnformalRegression should not take a calibration set! (-c option)");
@@ -345,7 +334,7 @@ public class OoBConformalRegressor extends ConformalRegressor implements Paralle
     timeOfUpdate = new long[ensembleSize];
 
     subspaceSize = calculateSubspaceSize(
-        mFeaturesPerTreeSizeOption.getValue(), mFeaturesModeOption.getChosenIndex(), instance);
+            mFeaturesPerTreeSizeOption.getValue(), mFeaturesModeOption.getChosenIndex(), instance);
 
     FIMTDD baseLearner = (FIMTDD) getPreparedClassOption(this.baseLearnerOption);
     baseLearner.subspaceSizeOption.setValue(subspaceSize);
